@@ -58,7 +58,7 @@
  */
 function hook_commerce_gpwebpay_ipn_process($order, $payment_method, $ipn) {
   error_log('IPN Process at API');
-}
+} 
 
 /**
  * Allows modules to alter the name-value pair array for a PayPal API request

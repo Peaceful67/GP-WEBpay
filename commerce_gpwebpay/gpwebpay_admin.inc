@@ -2,7 +2,7 @@
 
 function commerce_gpwebpay_settings_form() {
     $form = array();
-
+ 
     $form['commerce_gpwebpay_merchant'] = array(
         '#type' => 'textfield',
         '#title' => t('Merchant ID'),

@@ -11,4 +11,4 @@ dependencies[] = commerce_order
  
 configure = admin/commerce/config/gpwebpay
 files[] = commerce_gpwebpay.module
-files[] = gpwebpay_admin.inc
+files[] = gpwebpay_admin.inc 

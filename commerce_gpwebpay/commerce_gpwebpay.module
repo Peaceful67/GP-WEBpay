@@ -1,0 +1,477 @@
+<?php
+
+/**
+ * @file
+ * 
+ */
+include_once 'configs.inc';
+include_once 'gateway_functions.inc';
+
+function commerce_gpwebpay_permission() {
+  return array(
+    'administer commerce gpwebpay' => array(
+      'title' => t('Administer GP Webpay'),
+      'description' => t('Perform to administer GpWebpay Gateway'),
+    ),
+  );
+} 
+
+function commerce_gpwebpay_menu() {
+ 
+  $items = array();
+  $items['admin/commerce/config/gpwebpay'] = array(
+    'title' => 'GP Webpay',
+    'description' => 'Configuration of GP Webpay',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('commerce_gpwebpay_settings_form'),
+    'access arguments' => array('manage commerce gpwebpay'),
+    'file' => 'gpwebpay_admin.inc',
+  );
+
+  // Define an always accessible path to receive IPNs.
+  $items['commerce_gpwebpay/ipn'] = array(
+    'page callback' => 'commerce_gpwebpay_process_ipn',
+    'page arguments' => array(),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  // Define an additional IPN path that is payment method / instance specific.
+  $items['commerce_gpwebpay/ipn/%commerce_payment_method_instance'] = array(
+    'page callback' => 'commerce_gpwebpay_process_ipn',
+    'page arguments' => array(2),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+function commerce_gpwebpay_ipn_url($instance_id = NULL) {
+    error_log('commerce_gpwebpay_ipn_url');
+  $parts = array(
+    'commerce_gpwebpay',
+    'ipn',
+  );
+
+  if (!empty($instance_id)) {
+    $parts[] = $instance_id;
+  }
+
+  return url(implode('/', $parts), array('absolute' => TRUE));
+}
+
+/**
+ * Loads a stored IPN by ID.
+ *
+ * @param $id
+ *   The ID of the IPN to load.
+ * @param $type
+ *   The type of ID you've specified, either the serial numeric ipn_id or the
+ *     actual PayPal txn_id. Defaults to txn_id.
+ *
+ * @return
+ *   The original IPN with some meta data related to local processing.
+ */
+function commerce_gpwebpay_ipn_load($id, $type = 'txn_id') {
+    error_log('commerce_gpwebpay_ipn_load');
+  return db_select('commerce_paypal_ipn', 'cpi')
+    ->fields('cpi')
+    ->condition('cpi.' . $type, $id)
+    ->execute()
+    ->fetchAssoc();
+}
+/**
+ * Saves an IPN with some meta data related to local processing.
+ *
+ * @param $ipn
+ *   An IPN array with additional parameters for the order_id and Commerce
+ *     Payment transaction_id associated with the IPN.
+ *
+ * @return
+ *   The operation performed by drupal_write_record() on save; since the IPN is
+ *     received by reference, it will also contain the serial numeric ipn_id
+ *     used locally.
+ */
+function commerce_gpwebpay_ipn_save(&$ipn) {
+    error_log('commerce_gpwebpay_ipn_save');
+  if (!empty($ipn['ipn_id']) && commerce_gpwebpay_ipn_load($ipn['txn_id'])) {
+    $ipn['changed'] = REQUEST_TIME;
+
+    return drupal_write_record('commerce_gpwebpay_ipn', $ipn, 'ipn_id');
+  }
+  else {
+    $ipn['created'] = REQUEST_TIME;
+    $ipn['changed'] = REQUEST_TIME;
+
+    return drupal_write_record('commerce_gpwebpay_ipn', $ipn);
+  }
+}
+
+/**
+ * Deletes a stored IPN by ID.
+ *
+ * @param $id
+ *   The ID of the IPN to delete.
+ * @param $type
+ *   The type of ID you've specified, either the serial numeric ipn_id or the
+ *     actual PayPal txn_id. Defaults to txn_id.
+ */
+function commerce_gpwebpay_ipn_delete($id, $type = 'txn_id') {
+    error_log('commerce_gpwebpay_ipn_delete');
+  db_delete('commerce_gpwebpay_ipn')
+    ->condition($type, $id)
+    ->execute();
+}
+
+/**
+ * Returns a unique invoice number based on the Order ID and timestamp.
+ */
+function commerce_gpwebpay_ipn_invoice($order) {
+    error_log('commerce_gpwebpay_ipn_invoice');
+  return $order->order_id . '-' . REQUEST_TIME;
+}
+
+/**
+ * Returns an appropriate message given a pending reason.
+ */
+function commerce_gpwebpay_ipn_pending_reason($pending_reason) {
+    error_log('commerce_gpwebpay_ipn_reason');
+  switch ($pending_reason) {
+    case 'address':
+      return t('The payment is pending because your customer did not include a confirmed shipping address and your Payment Receiving Preferences is set to allow you to manually accept or deny each of these payments.');
+    case 'authorization':
+      return t('You set the payment action to Authorization and have not yet captured funds.');
+    case 'echeck':
+      return t('The payment is pending because it was made by an eCheck that has not yet cleared.');
+    case 'intl':
+      return t('The payment is pending because you hold a non-U.S. account and do not have a withdrawal mechanism.');
+    case 'multi-currency':
+      return t('You do not have a balance in the currency sent, and you do not have your Payment Receiving Preferences set to automatically convert and accept this payment.');
+    case 'order':
+      return t('You set the payment action to Order and have not yet captured funds.');
+    case 'paymentreview':
+      return t('The payment is pending while it is being reviewed by PayPal for risk.');
+    case 'unilateral':
+      return t('The payment is pending because it was made to an e-mail address that is not yet registered or confirmed.');
+    case 'upgrade':
+      return t('The payment is pending because it was either made via credit card and you do not have a Business or Premier account or you have reached the monthly limit for transactions on your account.');
+    case 'verify':
+      return t('The payment is pending because you are not yet verified.');
+    case 'other':
+      return t('The payment is pending for a reason other than those listed above. For more information, contact PayPal Customer Service.');
+  }
+}
+
+/**
+ * Submits an API request to GP WEB pay.
+ *
+ * This function is currently used by PayPal Payments Pro and Express Checkout.
+ *
+ * This function may be used for any PayPal payment method that uses the same
+ * settings array structure as these other payment methods and whose API
+ * requests should be submitted to the same URLs as determined by the function
+ * commerce_paypal_api_server_url().
+ *
+ * @param $payment_method
+ *   The payment method instance array associated with this API request.
+ * @param $nvp
+ *   The set of name-value pairs describing the transaction to submit.
+ * @param $order
+ *   The order the payment request is being made for.
+ *
+ * @return
+ *   The response array from PayPal if successful or FALSE on error.
+ */
+function commerce_gpwebpay_api_request($payment_method, $nvp = array(), $order = NULL) {
+    error_log('commerce_gpwebpay_api_request');
+  // Get the API endpoint URL for the payment method's transaction mode.
+  $url = commerce_gpwebpay_api_server_url($payment_method['settings']['server']);
+
+  // Add the default name-value pairs to the array.
+  $nvp += array(
+    'USER' => $payment_method['settings']['api_username'],
+    'PWD' => $payment_method['settings']['api_password'],
+    'SIGNATURE' => $payment_method['settings']['api_signature'],
+    'VERSION' => 1.0,
+  );
+
+   //Allow modules to alter parameters of the API request.
+  drupal_alter('commerce_gpwebpay_api_request', $nvp, $order, $payment_method);
+
+  // Log the request if specified.
+  if ($payment_method['settings']['log']['request'] == 'request') {
+    // Mask the credit card number and CVV.
+    $log_nvp = $nvp;
+    $log_nvp['PWD'] = str_repeat('X', strlen($log_nvp['PWD']));
+    $log_nvp['SIGNATURE'] = str_repeat('X', strlen($log_nvp['SIGNATURE']));
+
+    if (!empty($log_nvp['ACCT'])) {
+      $log_nvp['ACCT'] = str_repeat('X', strlen($log_nvp['ACCT']) - 4) . substr($log_nvp['ACCT'], -4);
+    }
+
+    if (!empty($log_nvp['CVV2'])) {
+      $log_nvp['CVV2'] = str_repeat('X', strlen($log_nvp['CVV2']));
+    }
+
+    watchdog('commerce_gpwebpay', 'GpWebPay API request to @url: !param', array('@url' => $url, '!param' => '<pre>' . check_plain(print_r($log_nvp, TRUE)) . '</pre>'), WATCHDOG_DEBUG);
+  }
+
+  // Prepare the name-value pair array to be sent as a string.
+  $pairs = array();
+
+  foreach ($nvp as $key => $value) {
+    $pairs[] = $key . '=' . urlencode($value);
+  }
+
+  // Setup the cURL request.
+  $ch = curl_init();
+  curl_setopt($ch, CURLOPT_URL, $url);
+  curl_setopt($ch, CURLOPT_VERBOSE, 0);
+  curl_setopt($ch, CURLOPT_POST, 1);
+  curl_setopt($ch, CURLOPT_POSTFIELDS, implode('&', $pairs));
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+  curl_setopt($ch, CURLOPT_NOPROGRESS, 1);
+  curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 0);
+  curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 1);
+
+  // Commerce PayPal requires SSL peer verification, which may prevent out of
+  // date servers from successfully processing API requests. If you get an error
+  // related to peer verification, you may need to download the CA certificate
+  // bundle file from http://curl.haxx.se/docs/caextract.html, place it in a
+  // safe location on your web server, and update your settings.php to set the
+  // commerce_paypal_cacert variable to contain the absolute path of the file.
+  // Alternately, you may be able to update your php.ini to point to the file
+  // with the curl.cainfo setting.
+  if (variable_get('commerce_wpwebpay_cacert', FALSE)) {
+    curl_setopt($ch, CURLOPT_CAINFO, variable_get('commerce_gpwebpay_cacert', ''));
+  }
+
+  $result = curl_exec($ch);
+
+  // Log any errors to the watchdog.
+  if ($error = curl_error($ch)) {
+    watchdog('commerce_gpwebpay', 'cURL error: @error', array('@error' => $error), WATCHDOG_ERROR);
+    return FALSE;
+  }
+  curl_close($ch);
+
+  // Make the response an array.
+  $response = array();
+
+  foreach (explode('&', $result) as $nvp) {
+    list($key, $value) = explode('=', $nvp);
+    $response[urldecode($key)] = urldecode($value);
+  }
+
+  // Log the response if specified.
+  if ($payment_method['settings']['log']['response'] == 'response') {
+    watchdog('commerce_gpwebpay', 'GpWebPay server response: !param', array('!param' => '<pre>' . check_plain(print_r($response, TRUE)) . '</pre>', WATCHDOG_DEBUG));
+  }
+
+  return $response;
+}
+
+
+
+/**
+ * Loads the payment transaction matching the PayPal transaction ID.
+ *
+ * @param $txn_id
+ *   The PayPal transaction ID to search for in the remote_id field.
+ *
+ * @return
+ *   The loaded payment transaction.
+ */
+function commerce_gpwebpay_payment_transaction_load($txn_id) {
+  $transactions = commerce_gpwebpay_transaction_load_multiple(array(), array('remote_id' => $txn_id));
+  return $transactions ? reset($transactions) : FALSE;
+}
+
+/**
+ * Returns the relevant PayPal payment action for a given transaction type.
+ *
+ * @param $txn_type
+ *   The type of transaction whose payment action should be returned; currently
+ *   supports COMMERCE_CREDIT_AUTH_CAPTURE and COMMERCE_CREDIT_AUTH_ONLY.
+ */
+function commerce_gpwebpay_payment_action($txn_type) {
+  switch ($txn_type) {
+    case COMMERCE_CREDIT_AUTH_ONLY:
+      return 'Authorization';
+    case COMMERCE_CREDIT_AUTH_CAPTURE:
+      return 'Sale';
+  }
+}
+
+/**
+ * Returns the description of a transaction type for a PayPal payment action.
+ */
+function commerce_gpwebpay_reverse_payment_action($payment_action) {
+  switch (strtoupper($payment_action)) {
+    case 'AUTHORIZATION':
+      return t('Authorization only');
+    case 'SALE':
+      return t('Authorization and capture');
+  }
+}
+
+/**
+ * Returns an array of all possible currency codes for the different PayPal
+ * payment methods.
+ *
+ * @param $method_id
+ *   The ID of the PayPal payment method whose currencies should be returned.
+ *
+ * @return
+ *   An associative array of currency codes with keys and values being the
+ *   currency codes accepted by the specified PayPal payment method.
+ */
+function commerce_gpwebpay_currencies($method_id) {
+  switch ($method_id) {
+    default: 
+        return drupal_map_assoc(array('HUN', 'EUR', 'USD'));
+    }
+}
+
+
+/**
+ * Returns an appropriate message given an AVS code.
+ */
+function commerce_gpwebpay_avs_code_message($code) {
+  if (is_numeric($code)) {
+    switch ($code) {
+      case '0':
+        return t('All the address information matched.');
+      case '1':
+        return t('None of the address information matched; transaction declined.');
+      case '2':
+        return t('Part of the address information matched.');
+      case '3':
+        return t('The merchant did not provide AVS information. Not processed.');
+      case '4':
+        return t('Address not checked, or acquirer had no response. Service not available.');
+      case 'Null':
+      default:
+        return t('No AVS response was obtained.');
+    }
+  }
+
+  switch ($code) {
+    case 'A':
+    case 'B':
+      return t('Address matched; postal code did not');
+    case 'C':
+    case 'N':
+      return t('Nothing matched; transaction declined');
+    case 'D':
+    case 'F':
+    case 'X':
+    case 'Y':
+      return t('Address and postal code matched');
+    case 'E':
+      return t('Not allowed for MOTO transactions; transaction declined');
+    case 'G':
+      return t('Global unavailable');
+    case 'I':
+      return t('International unavailable');
+    case 'P':
+    case 'W':
+    case 'Z':
+      return t('Postal code matched; address did not');
+    case 'R':
+      return t('Retry for validation');
+    case 'S':
+      return t('Service not supported');
+    case 'U':
+      return t('Unavailable');
+    default:
+      return t('An unknown error occurred.');
+  }
+}
+
+
+
+/**
+ * Returns a short description of the pending reason based on the given value.
+ */
+function commerce_gpwebpay_short_pending_reason($pendingreason) {
+  switch ($pendingreason) {
+    case 'none':
+      return t('No pending reason.');
+    case 'authorization':
+      return t('Authorization pending capture.');
+    case 'address':
+      return t('Pending unconfirmed address review.');
+    case 'echeck':
+      return t('eCheck has not yet cleared.');
+    case 'intl':
+      return t('Pending international transaction review.');
+    case 'multi-currency':
+      return t('Pending multi-currency review.');
+    case 'verify':
+      return t('Payment held until your account is verified.');
+    case 'completed':
+      return t('Payment has been completed.');
+    case 'other':
+      return t('Pending for an unknown reason.');
+    default:
+      return '';
+  }
+}
+
+/**
+ * Returns an array of PayPal payment methods.
+ */
+function commerce_gpwebpay_payment_methods() {
+  return array(
+    'visa' => t('Visa'),
+    'mastercard' => t('Mastercard'),
+  );
+}
+
+/**
+ * Returns an array of PayPal payment method icon img elements.
+ *
+ * @param $methods
+ *   An array of PayPal payment method names to include in the icons array; if
+ *   empty, all icons will be returned.
+ *
+ * @return
+ *   The array of themed payment method icons keyed by name: visa, mastercard,
+ *   amex, discover, echeck, paypal
+ */
+function commerce_gpwebpay_icons($methods = array()) {
+  $icons = array();
+
+  foreach (commerce_gpwebpay_payment_methods() as $name => $title) {
+    if (empty($methods) || in_array($name, $methods, TRUE)) {
+      $variables = array(
+        'path' => drupal_get_path('module', 'commerce_gpwebpay') . '/images/' . $name . '.jpg',
+        'title' => $title,
+        'alt' => $title,
+        'attributes' => array(
+          'class' => array('commerce-gpweb-icon'),
+        ),
+      );
+      $icons[$name] = theme('image', $variables);
+    }
+  }
+
+  return $icons;
+}
+
+/**
+ * Formats a price amount into a decimal value as expected by PayPal.
+ *
+ * @param $amount
+ *   An integer price amount.
+ * @param $currency_code
+ *   The currency code of the price.
+ *
+ * @return
+ *   The decimal price amount as expected by PayPal API servers.
+ */
+function commerce_gpwebpay_price_amount($amount, $currency_code) {
+  $rounded_amount = commerce_currency_round($amount, commerce_currency_load($currency_code));
+  return number_format(commerce_currency_amount_to_decimal($rounded_amount, $currency_code), 2, '.', '');
+}

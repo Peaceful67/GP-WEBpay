@@ -23,7 +23,7 @@ function commerce_gpwebpay_menu() {
         'file' => 'gpwebpay_admin.inc',
     ];
 
-//  path to receive IPNs.
+
     $items[GP_RESPONSE] = [
         'title' => 'Visszatérés a GP WEBPay fizetés oldaláról',
         'page callback' => 'commerce_gpwebpay_process_ipn',
@@ -55,7 +55,7 @@ function commerce_gpwebpay_redirect_form($form, &$form_state, $order, $payment_m
     $transaction->currency_code = $currency_code;
     commerce_payment_transaction_save($transaction);
 
-    //   dvm($transaction);
+
     $gp_send = [
         'MERCHANTNUMBER' => variable_get('commerce_gpwebpay_merchant', '---'),
         'OPERATION' => 'CREATE_ORDER',

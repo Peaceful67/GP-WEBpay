@@ -32,7 +32,7 @@ function commerce_gpwebpay_menu() {
         'type' => MENU_CALLBACK,
         'file' => 'gpwebpay_ipn.inc',
     ];
-    
+
 
     return $items;
 }
@@ -40,7 +40,13 @@ function commerce_gpwebpay_menu() {
 function commerce_gpwebpay_redirect_form($form, &$form_state, $order, $payment_method) {
     global $base_url;
     $gpwebpay_currencies = [
+        'CZK' => 203,
+        'EUR' => 978,
+        'USD' => 840,
+        'GBP' => 826,
+        'PLN' => 985,
         'HUF' => 348,
+        'LVL' => 428,
     ];
     $relative = base_path() . drupal_get_path('module', 'commerce_gpwebpay');
     $base = getcwd() . $relative;
@@ -54,18 +60,22 @@ function commerce_gpwebpay_redirect_form($form, &$form_state, $order, $payment_m
     $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
     $transaction->currency_code = $currency_code;
     commerce_payment_transaction_save($transaction);
-
-
+    
+    $billing_profile = commerce_customer_profile_load(get_customer_field($order->commerce_customer_billing, 'profile_id'));
+    $customer_email = get_customer_field($billing_profile->field_email, 'email');
+   
+    $addinfo = gpwebpay_create_addinfo($order_number);
     $gp_send = [
         'MERCHANTNUMBER' => variable_get('commerce_gpwebpay_merchant', '---'),
         'OPERATION' => 'CREATE_ORDER',
         'ORDERNUMBER' => $order_number,
         'AMOUNT' => $amount * 100,
         'CURRENCY' => $gpwebpay_currencies[$currency_code],
-        'DEPOSITFLAG' => 0,
+        'DEPOSITFLAG' => 1,
         'MERORDERNUM' => $transaction->transaction_id,
         'URL' => $base_url . '/' . GP_RESPONSE,
-        'EMAIL' => '',
+        'EMAIL' => $customer_email,
+        'ADDINFO' => $addinfo,
     ];
     $sign = new CSignature($base . PRIVATE_KEY, variable_get('commerce_gpwebpay_passwd', '---'), commerce_gpwebpay_public_key());
     $sign_data = '';
@@ -88,7 +98,9 @@ function commerce_gpwebpay_redirect_form($form, &$form_state, $order, $payment_m
     return $form;
 }
 
-
+function get_customer_field($var, $field_name) {
+    return isset($var['und'][0][$field_name]) ? $var['und'][0][$field_name] : false;
+}
 
 function commerce_gpwebpay_commerce_payment_method_info() {
     $payment_methods = array();
@@ -110,11 +122,191 @@ function commerce_gpwebpay_commerce_payment_method_info() {
 
 function commerce_gpwebpay_public_key() {
     $base = getcwd() . base_path() . drupal_get_path('module', 'commerce_gpwebpay');
-    return $base . (variable_get('commerce_gpwebpay_public_key', 0)==0 ? PUBLIC_TEST_GP_KEY : PUBLIC_PROD_GP_KEY);
+    return $base . (variable_get('commerce_gpwebpay_public_key', 0) == 0 ? PUBLIC_TEST_GP_KEY : PUBLIC_PROD_GP_KEY);
+}
+
+function gpwebpay_create_addinfo($order_id) {
+    $order = commerce_order_load($order_id);
+
+    $billing_profile = commerce_customer_profile_load(get_customer_field($order->commerce_customer_billing, 'profile_id'));
+    $shipping_profile = commerce_customer_profile_load(get_customer_field($order->commerce_customer_shipping, 'profile_id'));
+    $customer_first_name = get_customer_field($billing_profile->commerce_customer_address, 'first_name');
+    $customer_last_name = get_customer_field($billing_profile->commerce_customer_address, 'last_name');
+    $customer_country = get_customer_field($billing_profile->commerce_customer_address, 'country');
+    $customer_telefon = get_customer_field($billing_profile->field_telefon, 'phonenumber');
+    $customer_email = get_customer_field($billing_profile->field_email, 'email');
+
+    if (substr($customer_telefon, 0, 1) == '+') {  // Hamegadott országkódot, levágjuk és fixen betesszük a magyar 36-ot.
+        $customer_phone_country = substr($customer_telefon, 1, 2);
+        $customer_telefon = substr($customer_telefon, 3);
+    } else {
+        $customer_phone_country = '36';
+    }
+    $billing_address = get_customer_field($billing_profile->commerce_customer_address, 'thoroughfare');
+    $billing_city = get_customer_field($billing_profile->commerce_customer_address, 'locality');
+    $billing_country = get_customer_field($billing_profile->commerce_customer_address, 'country');
+
+    $shipping_address = get_customer_field($shipping_profile->commerce_customer_address, 'thoroughfare');
+    $shipping_city = get_customer_field($shipping_profile->commerce_customer_address, 'locality');
+    $shipping_country = get_customer_field($shipping_profile->commerce_customer_address, 'country');
+    $xml_addinfo = new SimpleXMLElement('<?xml version="1.0" encoding="UTF-8"?><additionalInfoRequest '
+            . 'xmlns="http://gpe.cz/gpwebpay/additionalInfo/request" '
+            . 'version="' . ADDINFO_VERSION . '"></additionalInfoRequest>');
+    $addinfo_array = [];
+    $addinfo_array['cardholderInfo']['cardholderDetails']['name'] = get_customer_field($billing_profile->commerce_customer_address, 'name_line');
+    $addinfo_array['cardholderInfo']['cardholderDetails']['email'] = $customer_email;
+    $addinfo_array['cardholderInfo']['cardholderDetails']['phoneCountry'] = $customer_phone_country;
+    $addinfo_array['cardholderInfo']['cardholderDetails']['phone'] = $customer_telefon;
+    $addinfo_array['cardholderInfo']['cardholderDetails']['mobilePhoneCountry'] = $customer_phone_country;
+    $addinfo_array['cardholderInfo']['cardholderDetails']['mobilePhone'] = $customer_telefon;
+
+    $addinfo_array['cardholderInfo']['billingDetails']['name'] = get_customer_field($billing_profile->commerce_customer_address, 'name_line');
+    $addinfo_array['cardholderInfo']['billingDetails']['address1'] = get_customer_field($billing_profile->commerce_customer_address, 'thoroughfare') . ' ' . get_customer_field($billing_profile->commerce_customer_address, 'premise');
+    $addinfo_array['cardholderInfo']['billingDetails']['city'] = get_customer_field($billing_profile->commerce_customer_address, 'locality');
+    $addinfo_array['cardholderInfo']['billingDetails']['postalCode'] = get_customer_field($billing_profile->commerce_customer_address, 'postal_code');
+    $addinfo_array['cardholderInfo']['billingDetails']['country'] = 348;
+    $addinfo_array['cardholderInfo']['billingDetails']['phone'] = $customer_telefon;
+    $addinfo_array['cardholderInfo']['billingDetails']['email'] = $customer_email;
+
+    $addinfo_array['cardholderInfo']['shippingDetails']['name'] = get_customer_field($shipping_profile->commerce_customer_address, 'name_line');
+    $addinfo_array['cardholderInfo']['shippingDetails']['address1'] = get_customer_field($shipping_profile->commerce_customer_address, 'thoroughfare') . ' ' . get_customer_field($billing_profile->commerce_customer_address, 'premise');
+    $addinfo_array['cardholderInfo']['shippingDetails']['city'] = get_customer_field($shipping_profile->commerce_customer_address, 'locality');
+    $addinfo_array['cardholderInfo']['shippingDetails']['postalCode'] = get_customer_field($shipping_profile->commerce_customer_address, 'postal_code');
+    $addinfo_array['cardholderInfo']['shippingDetails']['country'] = 348;
+    $addinfo_array['cardholderInfo']['shippingDetails']['phone'] = $customer_telefon;
+    $addinfo_array['cardholderInfo']['shippingDetails']['email'] = $customer_email;
+    /*
+      foreach ($wrapper->commerce_line_items as $key => $line_item_wrapper) {
+      $item = $line_item_wrapper->value();
+      $addinfo_array['shoppingCartInfo']['shoppingCartItems'][$key]['shoppingCartItem']['itemDescription'] = $item->line_item_label;
+      $addinfo_array['shoppingCartInfo']['shoppingCartItems'][$key]['shoppingCartItem']['itemQuantity'] = $item->quantity;
+      $addinfo_array['shoppingCartInfo']['shoppingCartItems'][$key]['shoppingCartItem']['itemUnitPrice'] = get_customer_field($item->commerce_unit_price, 'amount') * 100;
+      }
+
+     *     error_log('Addinfo Array: '.print_r($addinfo_array, true));
+     */
+    gpwebpay_array_to_xml($addinfo_array, $xml_addinfo);
+    return gpwebpay_remove_diacricts($xml_addinfo->asXML());
+}
+
+function gpwebpay_array_to_xml($array, &$xml_user_info) {
+    foreach ($array as $key => $value) {
+        if (is_array($value)) {
+            if (is_numeric($key)) {
+                $subnode = $xml_user_info;
+                gpwebpay_array_to_xml($value, $subnode);
+            } else {
+                $subnode = $xml_user_info->addChild("$key");
+                gpwebpay_array_to_xml($value, $subnode);
+            }
+        } elseif (!empty($value)) {
+            $xml_user_info->addChild("$key", htmlspecialchars(trim($value)));
+        }
+    }
 }
 
 function commerce_gpwebpay_payment_url() {
-    return (variable_get('commerce_gpwebpay_public_key', 0)==0 ? GP_TEST_URL : GP_PRODUCTION_URL);
+    return (variable_get('commerce_gpwebpay_public_key', 0) == 0 ? GP_TEST_URL : GP_PRODUCTION_URL);
+}
+
+function gpwebpay_remove_diacricts($str) {
+    $transliteration = array(
+        'Ĳ' => 'I', 'Ö' => 'O', 'Œ' => 'O', 'Ü' => 'U', 'ä' => 'a', 'æ' => 'a',
+        'ĳ' => 'i', 'ö' => 'o', 'œ' => 'o', 'ü' => 'u', 'ß' => 's', 'ſ' => 's',
+        'À' => 'A', 'Á' => 'A', 'Â' => 'A', 'Ã' => 'A', 'Ä' => 'A', 'Å' => 'A',
+        'Æ' => 'A', 'Ā' => 'A', 'Ą' => 'A', 'Ă' => 'A', 'Ç' => 'C', 'Ć' => 'C',
+        'Č' => 'C', 'Ĉ' => 'C', 'Ċ' => 'C', 'Ď' => 'D', 'Đ' => 'D', 'È' => 'E',
+        'É' => 'E', 'Ê' => 'E', 'Ë' => 'E', 'Ē' => 'E', 'Ę' => 'E', 'Ě' => 'E',
+        'Ĕ' => 'E', 'Ė' => 'E', 'Ĝ' => 'G', 'Ğ' => 'G', 'Ġ' => 'G', 'Ģ' => 'G',
+        'Ĥ' => 'H', 'Ħ' => 'H', 'Ì' => 'I', 'Í' => 'I', 'Î' => 'I', 'Ï' => 'I',
+        'Ī' => 'I', 'Ĩ' => 'I', 'Ĭ' => 'I', 'Į' => 'I', 'İ' => 'I', 'Ĵ' => 'J',
+        'Ķ' => 'K', 'Ľ' => 'K', 'Ĺ' => 'K', 'Ļ' => 'K', 'Ŀ' => 'K', 'Ł' => 'L',
+        'Ñ' => 'N', 'Ń' => 'N', 'Ň' => 'N', 'Ņ' => 'N', 'Ŋ' => 'N', 'Ò' => 'O',
+        'Ó' => 'O', 'Ô' => 'O', 'Õ' => 'O', 'Ø' => 'O', 'Ō' => 'O', 'Ő' => 'O',
+        'Ŏ' => 'O', 'Ŕ' => 'R', 'Ř' => 'R', 'Ŗ' => 'R', 'Ś' => 'S', 'Ş' => 'S',
+        'Ŝ' => 'S', 'Ș' => 'S', 'Š' => 'S', 'Ť' => 'T', 'Ţ' => 'T', 'Ŧ' => 'T',
+        'Ț' => 'T', 'Ù' => 'U', 'Ú' => 'U', 'Û' => 'U', 'Ū' => 'U', 'Ů' => 'U',
+        'Ű' => 'U', 'Ŭ' => 'U', 'Ũ' => 'U', 'Ų' => 'U', 'Ŵ' => 'W', 'Ŷ' => 'Y',
+        'Ÿ' => 'Y', 'Ý' => 'Y', 'Ź' => 'Z', 'Ż' => 'Z', 'Ž' => 'Z', 'à' => 'a',
+        'á' => 'a', 'â' => 'a', 'ã' => 'a', 'ā' => 'a', 'ą' => 'a', 'ă' => 'a',
+        'å' => 'a', 'ç' => 'c', 'ć' => 'c', 'č' => 'c', 'ĉ' => 'c', 'ċ' => 'c',
+        'ď' => 'd', 'đ' => 'd', 'è' => 'e', 'é' => 'e', 'ê' => 'e', 'ë' => 'e',
+        'ē' => 'e', 'ę' => 'e', 'ě' => 'e', 'ĕ' => 'e', 'ė' => 'e', 'ƒ' => 'f',
+        'ĝ' => 'g', 'ğ' => 'g', 'ġ' => 'g', 'ģ' => 'g', 'ĥ' => 'h', 'ħ' => 'h',
+        'ì' => 'i', 'í' => 'i', 'î' => 'i', 'ï' => 'i', 'ī' => 'i', 'ĩ' => 'i',
+        'ĭ' => 'i', 'į' => 'i', 'ı' => 'i', 'ĵ' => 'j', 'ķ' => 'k', 'ĸ' => 'k',
+        'ł' => 'l', 'ľ' => 'l', 'ĺ' => 'l', 'ļ' => 'l', 'ŀ' => 'l', 'ñ' => 'n',
+        'ń' => 'n', 'ň' => 'n', 'ņ' => 'n', 'ŉ' => 'n', 'ŋ' => 'n', 'ò' => 'o',
+        'ó' => 'o', 'ô' => 'o', 'õ' => 'o', 'ø' => 'o', 'ō' => 'o', 'ő' => 'o',
+        'ŏ' => 'o', 'ŕ' => 'r', 'ř' => 'r', 'ŗ' => 'r', 'ś' => 's', 'š' => 's',
+        'ť' => 't', 'ù' => 'u', 'ú' => 'u', 'û' => 'u', 'ū' => 'u', 'ů' => 'u',
+        'ű' => 'u', 'ŭ' => 'u', 'ũ' => 'u', 'ų' => 'u', 'ŵ' => 'w', 'ÿ' => 'y',
+        'ý' => 'y', 'ŷ' => 'y', 'ż' => 'z', 'ź' => 'z', 'ž' => 'z', 'Α' => 'A',
+        'Ά' => 'A', 'Ἀ' => 'A', 'Ἁ' => 'A', 'Ἂ' => 'A', 'Ἃ' => 'A', 'Ἄ' => 'A',
+        'Ἅ' => 'A', 'Ἆ' => 'A', 'Ἇ' => 'A', 'ᾈ' => 'A', 'ᾉ' => 'A', 'ᾊ' => 'A',
+        'ᾋ' => 'A', 'ᾌ' => 'A', 'ᾍ' => 'A', 'ᾎ' => 'A', 'ᾏ' => 'A', 'Ᾰ' => 'A',
+        'Ᾱ' => 'A', 'Ὰ' => 'A', 'ᾼ' => 'A', 'Β' => 'B', 'Γ' => 'G', 'Δ' => 'D',
+        'Ε' => 'E', 'Έ' => 'E', 'Ἐ' => 'E', 'Ἑ' => 'E', 'Ἒ' => 'E', 'Ἓ' => 'E',
+        'Ἔ' => 'E', 'Ἕ' => 'E', 'Ὲ' => 'E', 'Ζ' => 'Z', 'Η' => 'I', 'Ή' => 'I',
+        'Ἠ' => 'I', 'Ἡ' => 'I', 'Ἢ' => 'I', 'Ἣ' => 'I', 'Ἤ' => 'I', 'Ἥ' => 'I',
+        'Ἦ' => 'I', 'Ἧ' => 'I', 'ᾘ' => 'I', 'ᾙ' => 'I', 'ᾚ' => 'I', 'ᾛ' => 'I',
+        'ᾜ' => 'I', 'ᾝ' => 'I', 'ᾞ' => 'I', 'ᾟ' => 'I', 'Ὴ' => 'I', 'ῌ' => 'I',
+        'Θ' => 'T', 'Ι' => 'I', 'Ί' => 'I', 'Ϊ' => 'I', 'Ἰ' => 'I', 'Ἱ' => 'I',
+        'Ἲ' => 'I', 'Ἳ' => 'I', 'Ἴ' => 'I', 'Ἵ' => 'I', 'Ἶ' => 'I', 'Ἷ' => 'I',
+        'Ῐ' => 'I', 'Ῑ' => 'I', 'Ὶ' => 'I', 'Κ' => 'K', 'Λ' => 'L', 'Μ' => 'M',
+        'Ν' => 'N', 'Ξ' => 'K', 'Ο' => 'O', 'Ό' => 'O', 'Ὀ' => 'O', 'Ὁ' => 'O',
+        'Ὂ' => 'O', 'Ὃ' => 'O', 'Ὄ' => 'O', 'Ὅ' => 'O', 'Ὸ' => 'O', 'Π' => 'P',
+        'Ρ' => 'R', 'Ῥ' => 'R', 'Σ' => 'S', 'Τ' => 'T', 'Υ' => 'Y', 'Ύ' => 'Y',
+        'Ϋ' => 'Y', 'Ὑ' => 'Y', 'Ὓ' => 'Y', 'Ὕ' => 'Y', 'Ὗ' => 'Y', 'Ῠ' => 'Y',
+        'Ῡ' => 'Y', 'Ὺ' => 'Y', 'Φ' => 'F', 'Χ' => 'X', 'Ψ' => 'P', 'Ω' => 'O',
+        'Ώ' => 'O', 'Ὠ' => 'O', 'Ὡ' => 'O', 'Ὢ' => 'O', 'Ὣ' => 'O', 'Ὤ' => 'O',
+        'Ὥ' => 'O', 'Ὦ' => 'O', 'Ὧ' => 'O', 'ᾨ' => 'O', 'ᾩ' => 'O', 'ᾪ' => 'O',
+        'ᾫ' => 'O', 'ᾬ' => 'O', 'ᾭ' => 'O', 'ᾮ' => 'O', 'ᾯ' => 'O', 'Ὼ' => 'O',
+        'ῼ' => 'O', 'α' => 'a', 'ά' => 'a', 'ἀ' => 'a', 'ἁ' => 'a', 'ἂ' => 'a',
+        'ἃ' => 'a', 'ἄ' => 'a', 'ἅ' => 'a', 'ἆ' => 'a', 'ἇ' => 'a', 'ᾀ' => 'a',
+        'ᾁ' => 'a', 'ᾂ' => 'a', 'ᾃ' => 'a', 'ᾄ' => 'a', 'ᾅ' => 'a', 'ᾆ' => 'a',
+        'ᾇ' => 'a', 'ὰ' => 'a', 'ᾰ' => 'a', 'ᾱ' => 'a', 'ᾲ' => 'a', 'ᾳ' => 'a',
+        'ᾴ' => 'a', 'ᾶ' => 'a', 'ᾷ' => 'a', 'β' => 'b', 'γ' => 'g', 'δ' => 'd',
+        'ε' => 'e', 'έ' => 'e', 'ἐ' => 'e', 'ἑ' => 'e', 'ἒ' => 'e', 'ἓ' => 'e',
+        'ἔ' => 'e', 'ἕ' => 'e', 'ὲ' => 'e', 'ζ' => 'z', 'η' => 'i', 'ή' => 'i',
+        'ἠ' => 'i', 'ἡ' => 'i', 'ἢ' => 'i', 'ἣ' => 'i', 'ἤ' => 'i', 'ἥ' => 'i',
+        'ἦ' => 'i', 'ἧ' => 'i', 'ᾐ' => 'i', 'ᾑ' => 'i', 'ᾒ' => 'i', 'ᾓ' => 'i',
+        'ᾔ' => 'i', 'ᾕ' => 'i', 'ᾖ' => 'i', 'ᾗ' => 'i', 'ὴ' => 'i', 'ῂ' => 'i',
+        'ῃ' => 'i', 'ῄ' => 'i', 'ῆ' => 'i', 'ῇ' => 'i', 'θ' => 't', 'ι' => 'i',
+        'ί' => 'i', 'ϊ' => 'i', 'ΐ' => 'i', 'ἰ' => 'i', 'ἱ' => 'i', 'ἲ' => 'i',
+        'ἳ' => 'i', 'ἴ' => 'i', 'ἵ' => 'i', 'ἶ' => 'i', 'ἷ' => 'i', 'ὶ' => 'i',
+        'ῐ' => 'i', 'ῑ' => 'i', 'ῒ' => 'i', 'ῖ' => 'i', 'ῗ' => 'i', 'κ' => 'k',
+        'λ' => 'l', 'μ' => 'm', 'ν' => 'n', 'ξ' => 'k', 'ο' => 'o', 'ό' => 'o',
+        'ὀ' => 'o', 'ὁ' => 'o', 'ὂ' => 'o', 'ὃ' => 'o', 'ὄ' => 'o', 'ὅ' => 'o',
+        'ὸ' => 'o', 'π' => 'p', 'ρ' => 'r', 'ῤ' => 'r', 'ῥ' => 'r', 'σ' => 's',
+        'ς' => 's', 'τ' => 't', 'υ' => 'y', 'ύ' => 'y', 'ϋ' => 'y', 'ΰ' => 'y',
+        'ὐ' => 'y', 'ὑ' => 'y', 'ὒ' => 'y', 'ὓ' => 'y', 'ὔ' => 'y', 'ὕ' => 'y',
+        'ὖ' => 'y', 'ὗ' => 'y', 'ὺ' => 'y', 'ῠ' => 'y', 'ῡ' => 'y', 'ῢ' => 'y',
+        'ῦ' => 'y', 'ῧ' => 'y', 'φ' => 'f', 'χ' => 'x', 'ψ' => 'p', 'ω' => 'o',
+        'ώ' => 'o', 'ὠ' => 'o', 'ὡ' => 'o', 'ὢ' => 'o', 'ὣ' => 'o', 'ὤ' => 'o',
+        'ὥ' => 'o', 'ὦ' => 'o', 'ὧ' => 'o', 'ᾠ' => 'o', 'ᾡ' => 'o', 'ᾢ' => 'o',
+        'ᾣ' => 'o', 'ᾤ' => 'o', 'ᾥ' => 'o', 'ᾦ' => 'o', 'ᾧ' => 'o', 'ὼ' => 'o',
+        'ῲ' => 'o', 'ῳ' => 'o', 'ῴ' => 'o', 'ῶ' => 'o', 'ῷ' => 'o', 'А' => 'A',
+        'Б' => 'B', 'В' => 'V', 'Г' => 'G', 'Д' => 'D', 'Е' => 'E', 'Ё' => 'E',
+        'Ж' => 'Z', 'З' => 'Z', 'И' => 'I', 'Й' => 'I', 'К' => 'K', 'Л' => 'L',
+        'М' => 'M', 'Н' => 'N', 'О' => 'O', 'П' => 'P', 'Р' => 'R', 'С' => 'S',
+        'Т' => 'T', 'У' => 'U', 'Ф' => 'F', 'Х' => 'K', 'Ц' => 'T', 'Ч' => 'C',
+        'Ш' => 'S', 'Щ' => 'S', 'Ы' => 'Y', 'Э' => 'E', 'Ю' => 'Y', 'Я' => 'Y',
+        'а' => 'A', 'б' => 'B', 'в' => 'V', 'г' => 'G', 'д' => 'D', 'е' => 'E',
+        'ё' => 'E', 'ж' => 'Z', 'з' => 'Z', 'и' => 'I', 'й' => 'I', 'к' => 'K',
+        'л' => 'L', 'м' => 'M', 'н' => 'N', 'о' => 'O', 'п' => 'P', 'р' => 'R',
+        'с' => 'S', 'т' => 'T', 'у' => 'U', 'ф' => 'F', 'х' => 'K', 'ц' => 'T',
+        'ч' => 'C', 'ш' => 'S', 'щ' => 'S', 'ы' => 'Y', 'э' => 'E', 'ю' => 'Y',
+        'я' => 'Y', 'ð' => 'd', 'Ð' => 'D', 'þ' => 't', 'Þ' => 'T', 'ა' => 'a',
+        'ბ' => 'b', 'გ' => 'g', 'დ' => 'd', 'ე' => 'e', 'ვ' => 'v', 'ზ' => 'z',
+        'თ' => 't', 'ი' => 'i', 'კ' => 'k', 'ლ' => 'l', 'მ' => 'm', 'ნ' => 'n',
+        'ო' => 'o', 'პ' => 'p', 'ჟ' => 'z', 'რ' => 'r', 'ს' => 's', 'ტ' => 't',
+        'უ' => 'u', 'ფ' => 'p', 'ქ' => 'k', 'ღ' => 'g', 'ყ' => 'q', 'შ' => 's',
+        'ჩ' => 'c', 'ც' => 't', 'ძ' => 'd', 'წ' => 't', 'ჭ' => 'c', 'ხ' => 'k',
+        'ჯ' => 'j', 'ჰ' => 'h'
+    );
+    $text = str_replace(array_keys($transliteration), array_values($transliteration), $str);
+    return preg_replace("/\r|\n/", "", $text); // remove accidantal newlines
 }
 
 class CSignature {

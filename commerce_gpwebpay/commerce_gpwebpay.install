@@ -5,13 +5,3 @@
  * Installs the tables required by Commerce GP WebPay
  */ 
 
-
-/**
- * Implements hook_schema().
- */
-function commerce_gpwebpay_schema() {
-   
-  $schema = array();
-
-  return $schema;
-}

@@ -37,8 +37,8 @@ function commerce_gpwebpay_settings_form() {
         '#type' => 'radios',
         '#title' => 'Payment gateway',
         '#options' => [
-            0 => 'Test',
-            1 => 'Production',
+            0 => 'Test, URL: '.GP_TEST_URL,
+            1 => 'Production, URL: '.GP_PRODUCTION_URL,
         ],
         '#default_value' => variable_get('commerce_gpwebpay_public_key', 0),
     ];
@@ -49,6 +49,11 @@ function commerce_gpwebpay_settings_form() {
         '#default_value' => variable_get('commerce_gpwebpay_enabled', 1),
         '#required' => false,
     );
+    $form['addinfo_version'] = [
+        '#type' => 'item',
+        '#title' => t('Addinfo version'),
+        '#markup' => ADDINFO_VERSION,
+    ];
     $form['#submit'][] = 'commerce_gpwebpay_settings_form_submit';
     return system_settings_form($form);
 }
@@ -70,5 +75,4 @@ function commerce_gpwebpay_settings_form_submit($form, &$form_state) {
         }
     }
     $new_file = file_unmanaged_move($file->uri, $destination, FILE_EXISTS_REPLACE);
-
 }
